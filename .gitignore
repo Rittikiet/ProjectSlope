@@ -25,3 +25,4 @@
 __pycache__/
 ~$*
 ~WRL*.tmp
+/aruco_4x4_50_id1.png
