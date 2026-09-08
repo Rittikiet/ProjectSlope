@@ -12,3 +12,16 @@
 /โปรเจค(ไฟนอล).pdf
 /โปรเจค.docx
 /โปรเจคดิน.docx
+
+# Test data and generated measurement artifacts
+/movement_data.db
+/movement_export.csv
+/movement_comparison.csv
+/sessions/
+/snapshots/
+/recordings/
+/outputs/
+/.artifacts/
+__pycache__/
+~$*
+~WRL*.tmp
