@@ -5,7 +5,6 @@
 /9 ฤทธิเกียรติ มาใจ(สไลด์นำเสนอ).pdf
 /aruco_4x4_50_id0.png
 /generate_aruco_marker.py
-/requirements.txt
 /กล่อง.skb
 /กล่อง.skp
 /การวิเคราะห์อิทธิพลความลาดชันของดินที่มีผลต่อการตรวจวัดการเคลื่อนตัวของหน้าดินโดยใช้อัลกอริทึม YOLO.pdf
@@ -15,12 +14,15 @@
 
 # Test data and generated measurement artifacts
 /movement_data.db
+/movement_data_before_marker_size_fix_*.db
 /movement_export.csv
 /movement_comparison.csv
 /sessions/
 /snapshots/
 /recordings/
+/calibration_images/
 /outputs/
+/repeatability_results/
 /.artifacts/
 __pycache__/
 ~$*

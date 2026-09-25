@@ -1,7 +1,7 @@
 """Calibrate the webcam using a printed chessboard pattern.
 
-Example for a board with 9 x 6 INNER corners and 24 mm squares:
-    python camera_calibration.py --cols 9 --rows 6 --square-size 0.024
+Example for a board with 8 x 6 INNER corners and 25 mm squares:
+    python camera_calibration.py --cols 8 --rows 6 --square-size 0.025
 
 Keys:
     S - save the currently detected chessboard view
@@ -12,6 +12,7 @@ Keys:
 import argparse
 from getpass import getpass
 import os
+import time
 from urllib.parse import quote
 
 import cv2
@@ -30,6 +31,8 @@ def open_camera(source: str, width: int, height: int, rtsp_transport: str):
             camera = cv2.VideoCapture(source)
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     camera.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    # Keep latency low when an RTSP camera delivers frames faster than processing.
+    camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return camera
 
 
@@ -52,9 +55,9 @@ def main():
     parser.add_argument("--hikvision-channel", type=int, default=101,
                         help="101=main stream, 102=substream for channel 1")
     parser.add_argument("--rtsp-transport", choices=("tcp", "udp"), default="tcp")
-    parser.add_argument("--cols", type=int, default=9, help="number of INNER corners across")
+    parser.add_argument("--cols", type=int, default=8, help="number of INNER corners across")
     parser.add_argument("--rows", type=int, default=6, help="number of INNER corners down")
-    parser.add_argument("--square-size", type=float, default=0.024,
+    parser.add_argument("--square-size", type=float, default=0.025,
                         help="printed square side length in metres")
     parser.add_argument("--output", default="camera_calibration.npz")
     parser.add_argument("--width", type=int, default=1920)
@@ -85,10 +88,23 @@ def main():
 
     print("Show the chessboard from different angles. Press S to save a view, C to calibrate.")
     image_size = None
+    failed_reads = 0
     while True:
         ok, frame = cap.read()
         if not ok:
-            break
+            failed_reads += 1
+            if failed_reads < 10:
+                time.sleep(0.05)
+                continue
+            print("สตรีมสะดุด กำลังเชื่อมต่อกล้องใหม่...")
+            cap.release()
+            time.sleep(1)
+            cap = open_camera(source, args.width, args.height, args.rtsp_transport)
+            failed_reads = 0
+            if not cap.isOpened():
+                raise RuntimeError("เชื่อมต่อสตรีมกล้องใหม่ไม่สำเร็จ")
+            continue
+        failed_reads = 0
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         found, corners = cv2.findChessboardCorners(
             gray, pattern_size,
@@ -130,7 +146,11 @@ def main():
             total_points = 0
             for object_pts, image_pts, rvec, tvec in zip(object_points, image_points, rvecs, tvecs):
                 projected, _ = cv2.projectPoints(object_pts, rvec, tvec, camera_matrix, dist_coeffs)
-                total_error += cv2.norm(image_pts, projected, cv2.NORM_L2SQR)
+                difference = (
+                    image_pts.reshape(-1, 2).astype(np.float64)
+                    - projected.reshape(-1, 2).astype(np.float64)
+                )
+                total_error += float(np.sum(difference ** 2))
                 total_points += len(object_pts)
             reprojection_error = float(np.sqrt(total_error / total_points))
             np.savez(
