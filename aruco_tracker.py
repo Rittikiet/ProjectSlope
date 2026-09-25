@@ -1,9 +1,9 @@
 """ตรวจจับ ArUco ด้วยกล้องโน้ตบุ๊ก แสดงตำแหน่ง 3 มิติและติดตามจุดศูนย์กลาง
 
 ตัวอย่าง:
-    python aruco_tracker.py --marker-length 0.05
+    python aruco_tracker.py --marker-length 0.03
 
-marker-length มีหน่วยเป็นเมตร (0.05 = เป้ากว้าง 5 ซม.)
+marker-length มีหน่วยเป็นเมตร (0.03 = เป้ากว้าง 3 ซม.)
 กด Q หรือ ESC เพื่อปิดโปรแกรม
 """
 
@@ -173,6 +173,8 @@ def open_camera(source: str, width: int, height: int, rtsp_transport: str):
             camera = cv2.VideoCapture(source)
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     camera.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    # Keep latency low when an RTSP camera delivers frames faster than processing.
+    camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return camera
 
 
@@ -265,6 +267,132 @@ def draw_movement_chart(records, output_path: Path):
     return cv2.imwrite(str(output_path), image)
 
 
+def write_session_excel(output_path: Path, comparison_rows, marker_ids, raw_headers, raw_rows):
+    """Write an editable Excel report with a movement chart and the raw data."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.chart import LineChart, Reference
+        from openpyxl.chart.series import SeriesLabel
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError as error:
+        print("ไม่ได้สร้าง Excel report: ติดตั้ง openpyxl ด้วย pip install -r requirements.txt")
+        return False
+
+    workbook = Workbook()
+    summary_sheet = workbook.active
+    summary_sheet.title = "กราฟและข้อมูล"
+    comparison_headers = [
+        "เวลาสะสม (วินาที)", "วันเวลาที่บันทึก",
+        *[f"เป้า ID {marker_id} (มม.)" for marker_id in marker_ids],
+    ]
+    summary_sheet.append(comparison_headers)
+    for elapsed_seconds, recorded_at, distances in comparison_rows:
+        summary_sheet.append([
+            elapsed_seconds, recorded_at,
+            *[distances.get(marker_id) for marker_id in marker_ids],
+        ])
+
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    header_font = Font(color="FFFFFF", bold=True)
+    for cell in summary_sheet[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+    summary_sheet.freeze_panes = "C2"
+    summary_sheet.auto_filter.ref = summary_sheet.dimensions
+    summary_sheet.column_dimensions["A"].width = 20
+    summary_sheet.column_dimensions["B"].width = 32
+    for column in range(3, len(comparison_headers) + 1):
+        summary_sheet.column_dimensions[chr(64 + column)].width = 18
+    for row in summary_sheet.iter_rows(min_row=2, min_col=1, max_col=1):
+        row[0].number_format = "0.000"
+    for row in summary_sheet.iter_rows(min_row=2, min_col=3, max_col=len(comparison_headers)):
+        for cell in row:
+            cell.number_format = "0.000"
+
+    if marker_ids and len(comparison_rows) > 0:
+        chart = LineChart()
+        chart.title = "ระยะการเคลื่อนที่เทียบกับเวลา"
+        chart.style = 13
+        chart.y_axis.title = "ระยะการเคลื่อนที่ (mm)"
+        chart.x_axis.title = "เวลาสะสม (s)"
+        chart.height = 14
+        chart.width = 28
+        data = Reference(summary_sheet, min_col=3, max_col=2 + len(marker_ids), min_row=1,
+                         max_row=len(comparison_rows) + 1)
+        categories = Reference(summary_sheet, min_col=1, min_row=2,
+                               max_row=len(comparison_rows) + 1)
+        chart.add_data(data, titles_from_data=True)
+        chart.set_categories(categories)
+        summary_sheet.add_chart(chart, "A" + str(len(comparison_rows) + 4))
+
+    raw_sheet = workbook.create_sheet("ข้อมูลดิบ")
+    raw_sheet.append(raw_headers)
+    for raw_row in raw_rows:
+        raw_sheet.append(list(raw_row))
+    for cell in raw_sheet[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", wrap_text=True)
+    raw_sheet.freeze_panes = "A2"
+    raw_sheet.auto_filter.ref = raw_sheet.dimensions
+    for index, header in enumerate(raw_headers, start=1):
+        raw_sheet.column_dimensions[get_column_letter(index)].width = min(max(len(header) + 3, 15), 28)
+
+    speed_by_time = {}
+    for raw_row in raw_rows:
+        elapsed_seconds, speed = raw_row[12], raw_row[13]
+        if elapsed_seconds is None or speed is None:
+            continue
+        key = round(float(elapsed_seconds), 3)
+        point = speed_by_time.setdefault(key, (float(key), []))
+        point[1].append(float(speed))
+    speed_summary = [
+        (elapsed, sum(speeds) / len(speeds), max(speeds))
+        for elapsed, speeds in sorted(speed_by_time.values())
+    ]
+    if speed_summary:
+        summary_start_column = len(raw_headers) + 2
+        summary_end_column = summary_start_column + 2
+        summary_headers = [
+            "เวลาสะสม (วินาที)", "ความเร็วเฉลี่ย (มม./วินาที)",
+            "ความเร็วสูงสุด (มม./วินาที)",
+        ]
+        for index, header in enumerate(summary_headers, start=summary_start_column):
+            cell = raw_sheet.cell(1, index, header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", wrap_text=True)
+            raw_sheet.column_dimensions[get_column_letter(index)].width = 22
+        for row_index, values in enumerate(speed_summary, start=2):
+            for column_index, value in enumerate(values, start=summary_start_column):
+                raw_sheet.cell(row_index, column_index, value).number_format = "0.000"
+        speed_chart = LineChart()
+        speed_chart.title = "ความเร็วเฉลี่ยและสูงสุดเทียบกับเวลา"
+        speed_chart.y_axis.title = "ความเร็ว (มม./วินาที)"
+        speed_chart.x_axis.title = "เวลาสะสม (วินาที)"
+        speed_chart.height = 14
+        speed_chart.width = 28
+        speed_chart.add_data(
+            Reference(raw_sheet, min_col=summary_start_column + 1, max_col=summary_end_column,
+                      min_row=1, max_row=len(speed_summary) + 1),
+            titles_from_data=True,
+        )
+        speed_chart.set_categories(
+            Reference(raw_sheet, min_col=summary_start_column, min_row=2,
+                      max_row=len(speed_summary) + 1),
+        )
+        speed_chart.series[0].tx = SeriesLabel(v=summary_headers[1])
+        speed_chart.series[1].tx = SeriesLabel(v=summary_headers[2])
+        speed_chart.series[0].graphicalProperties.line.solidFill = "1F4E78"
+        speed_chart.series[1].graphicalProperties.line.solidFill = "C00000"
+        raw_sheet.add_chart(speed_chart, f"{get_column_letter(summary_end_column + 2)}2")
+
+    workbook.save(output_path)
+    return True
+
+
 def save_session_report(database, session_id: str, report_directory: Path):
     """Save a presentation-ready comparison CSV and graph for one test session."""
     rows = database.execute(
@@ -279,11 +407,11 @@ def save_session_report(database, session_id: str, report_directory: Path):
     output_directory.mkdir(parents=True, exist_ok=True)
 
     raw_headers = [
-        "วันเวลาที่บันทึก", "รหัส ArUco", "ตำแหน่ง X (เมตร)", "ตำแหน่ง Y (เมตร)",
-        "ตำแหน่ง Z (เมตร)", "ไฟล์ภาพประกอบ", "จุดกึ่งกลาง X (พิกเซล)",
-        "จุดกึ่งกลาง Y (พิกเซล)", "การเปลี่ยน X (มม.)", "การเปลี่ยน Y (มม.)",
-        "การเปลี่ยน Z (มม.)", "ระยะการเคลื่อนที่ (มม.)", "เวลาสะสม (วินาที)",
-        "ความเร็ว (มม./วินาที)", "มุมเอียง (องศา)",
+        "วันเวลาที่บันทึก", "รหัส ArUco", "ตำแหน่ง X (m)", "ตำแหน่ง Y (m)",
+        "ตำแหน่ง Z (m)", "ไฟล์ภาพประกอบ", "จุดกึ่งกลาง X (pixel)",
+        "จุดกึ่งกลาง Y (pixel)", "dX (mm)", "dY (m)",
+        "dZ (มม.)", "ระยะการเคลื่อนที่ (mm)", "เวลาสะสม (s)",
+        "ความเร็ว (mm/s))", "มุมเอียง (degre)",
     ]
     raw_rows = database.execute(
         """
@@ -320,20 +448,21 @@ def save_session_report(database, session_id: str, report_directory: Path):
             "เวลาสะสม (วินาที)", "วันเวลาที่บันทึก",
             *[f"เป้า ID {marker_id} (มม.)" for marker_id in marker_ids],
         ])
-        for elapsed_seconds, recorded_at, distances in sorted(points.values()):
+        comparison_rows = sorted(points.values())
+        for elapsed_seconds, recorded_at, distances in comparison_rows:
             writer.writerow([
                 elapsed_seconds, recorded_at,
                 *[distances.get(marker_id) for marker_id in marker_ids],
             ])
 
-    chart_path = output_directory / "movement_graph.png"
-    chart_records = [(elapsed, marker_id, distance) for _, marker_id, elapsed, distance in rows]
-    if not draw_movement_chart(chart_records, chart_path):
-        chart_path = None
+    excel_path = output_directory / "movement_report.xlsx"
+    excel_created = write_session_excel(
+        excel_path, comparison_rows, marker_ids, raw_headers, raw_rows,
+    )
     print(f"Saved session comparison CSV: {csv_path}")
     print(f"Saved session raw data CSV: {raw_csv_path}")
-    if chart_path is not None:
-        print(f"Saved session graph: {chart_path}")
+    if excel_created:
+        print(f"Saved editable Excel report: {excel_path}")
     return output_directory
 
 
@@ -351,8 +480,8 @@ def main():
                         help="101=สตรีมหลัก, 102=สตรีมย่อย ของ channel 1")
     parser.add_argument("--rtsp-transport", choices=("tcp", "udp"), default="tcp",
                         help="รูปแบบส่งข้อมูล RTSP (ค่าเริ่มต้น tcp)")
-    parser.add_argument("--marker-length", type=float, default=0.05,
-                        help="ความยาวด้านของ ArUco หน่วยเมตร (ค่าเริ่มต้น 0.05)")
+    parser.add_argument("--marker-length", type=float, default=0.032,
+                        help="ความยาวด้านของ ArUco หน่วยเมตร (ค่าเริ่มต้น 0.032 = 3.2 ซม.)")
     parser.add_argument("--horizontal-fov", type=float, default=103.0,
                         help="horizontal FOV ของกล้อง (องศา; ค่าเริ่มต้น 103)")
     parser.add_argument("--vertical-fov", type=float, default=56.0,
@@ -440,6 +569,7 @@ def main():
     active_session_id = None
     active_snapshot_directory = None
     active_video_directory = None
+    failed_reads = 0
     print(f"Ready to save measurements to SQLite: {args.database} (every {args.log_interval:g} s)")
     if reference_poses:
         print(f"Loaded baselines for marker IDs: {sorted(reference_poses)}")
@@ -448,8 +578,20 @@ def main():
     while True:
         ok, frame = cap.read()
         if not ok:
-            print("อ่านภาพจากกล้องไม่สำเร็จ")
-            break
+            failed_reads += 1
+            if failed_reads < 10:
+                time.sleep(0.05)
+                continue
+            print("สตรีมสะดุด กำลังเชื่อมต่อกล้องใหม่...")
+            cap.release()
+            time.sleep(1)
+            cap = open_camera(source, args.width, args.height, args.rtsp_transport)
+            failed_reads = 0
+            if not cap.isOpened():
+                print("เชื่อมต่อสตรีมกล้องใหม่ไม่สำเร็จ")
+                break
+            continue
+        failed_reads = 0
 
         height, width = frame.shape[:2]
         if camera_matrix is None:
